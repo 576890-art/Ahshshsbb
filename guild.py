@@ -1,106 +1,126 @@
 import json
 import time
 import requests
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import os
 
-# --- আপনার সেটিংস (এখানে পরিবর্তন করুন) ---
-# আপনি যে গিল্ডে সবাইকে জয়েন করাতে চান, তার আইডি নিচে কোটেশনের ভেতর লিখুন
-TARGET_GUILD_ID = "123456789"  # <--- এখানে আপনার আসল Guild ID বসিয়ে দিন
-
-# API লিংক (নতুন বা কার্যকর লিংক পেলে এখানে পরিবর্তন করবেন)
+# API endpoint (do not change)
 API_BASE = "https://danger-guild-management-web.vercel.app/join"
+
+# File containing the accounts list
 ACCOUNTS_FILE = "accounts.json"
 
 
-# --- Render Web Service সচল রাখার জন্য ফেক সার্ভার ---
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write("বট সার্ভিস সফলভাবে সচল রয়েছে!".encode("utf-8"))
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
-    server.serve_forever()
-
-
-# --- accounts.json ফাইল থেকে অ্যাকাউন্ট লোড করা ---
 def load_accounts(filepath):
+    """
+    Load accounts from a JSON file.
+    Expected format:
+    [
+        {"uid": "123456789", "password": "pass1"},
+        {"uid": "987654321", "password": "pass2"}
+    ]
+    """
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        # Support {"accounts": [...]} wrapper too
         if isinstance(data, dict) and "accounts" in data:
             data = data["accounts"]
-        return data if isinstance(data, list) else []
-    except Exception as e:
-        print(f"[ত্রুটি] অ্যাকাউন্ট ফাইল লোড করা যায়নি: {e}")
+
+        if not isinstance(data, list):
+            raise ValueError("accounts.json must contain a JSON array of objects")
+
+        return data
+
+    except FileNotFoundError:
+        print(f"[ERROR] {filepath} not found. Please create it first.")
+        return []
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] Invalid JSON in {filepath}: {e}")
         return []
 
 
-# --- গিল্ডে জয়েন করার রিকোয়েস্ট পাঠানো ---
 def join_guild(guild_id, uid, password, session=None):
+    """
+    Send a GET request to the join endpoint.
+    Returns (success: bool, message: str).
+    """
     url = f"{API_BASE}?guild_id={guild_id}&uid={uid}&password={password}"
+
     try:
         requester = session if session else requests
         resp = requester.get(url, timeout=15)
+
         try:
             body = resp.json()
-        except Exception:
+        except ValueError:
             body = resp.text
 
         if resp.status_code == 200:
-            return True, f"সফল — {body}"
+            return True, f"SUCCESS — {body}"
         else:
             return False, f"HTTP {resp.status_code} — {body}"
+
+    except requests.exceptions.Timeout:
+        return False, "Request timed out"
+    except requests.exceptions.ConnectionError:
+        return False, "Connection error"
     except Exception as e:
-        return False, str(e)
+        return False, f"Unexpected error: {e}"
 
 
-# --- মূল প্রসেসিং ফাংশন ---
-def bot_worker():
-    # যদি Render Environment-এ GUILD_ID থাকে তবে সেটি নেবে, না থাকলে কোডের TARGET_GUILD_ID ব্যবহার করবে
-    guild_id = os.environ.get("GUILD_ID", TARGET_GUILD_ID).strip()
-    
-    accounts = load_accounts(ACCOUNTS_FILE)
-    if not accounts:
-        print("[ত্রুটি] accounts.json ফাইলে কোনো অ্যাকাউন্ট পাওয়া যায়নি।")
+def main():
+    print("=" * 55)
+    print("   Guild Join Bot — Danger Guild Management")
+    print("=" * 55)
+
+    # ---------- Ask for Guild ID ----------
+    guild_id = input("Enter Guild ID : ").strip()
+    if not guild_id:
+        print("[ERROR] Guild ID cannot be empty. Exiting.")
         return
 
+    # ---------- Load accounts ----------
+    accounts = load_accounts(ACCOUNTS_FILE)
+    if not accounts:
+        print("[ERROR] No accounts loaded. Exiting.")
+        return
+
+    print("-" * 55)
+    print(f"[INFO] Guild ID   : {guild_id}")
+    print(f"[INFO] Accounts   : {len(accounts)} found")
+    print("-" * 55)
+
     session = requests.Session()
-    print("=" * 50)
-    print(f"[তথ্য] টার্গেট গিল্ড আইডি : {guild_id}")
-    print(f"[তথ্য] মোট অ্যাকাউন্ট সংখ্যা : {len(accounts)}")
-    print("=" * 50)
+    success_count = 0
+    fail_count = 0
 
     for idx, acc in enumerate(accounts, start=1):
         uid = str(acc.get("uid", "")).strip()
         password = str(acc.get("password", "")).strip()
 
         if not uid or not password:
-            print(f"[{idx}/{len(accounts)}] বাদ দেওয়া হয়েছে — UID বা পাসওয়ার্ড খালি।")
+            print(f"[{idx}/{len(accounts)}] SKIPPED — missing uid or password")
+            fail_count += 1
             continue
 
+        masked_pw = password[:2] + "*" * (len(password) - 2) if len(password) > 2 else "***"
+        print(f"[{idx}/{len(accounts)}] UID: {uid} | PW: {masked_pw} ... ", end="", flush=True)
+
         ok, msg = join_guild(guild_id, uid, password, session)
+
         if ok:
-            print(f"[{idx}/{len(accounts)}] UID: {uid} -> ✅ যুক্ত হয়েছে")
+            success_count += 1
+            print("✅ JOINED")
         else:
-            print(f"[{idx}/{len(accounts)}] UID: {uid} -> ❌ ব্যর্থ ({msg})")
+            fail_count += 1
+            print(f"❌ FAILED — {msg}")
 
         time.sleep(0.5)
 
-    print("=" * 50)
-    print("[সমাপ্ত] সকল অ্যাকাউন্টের কাজ শেষ হয়েছে।")
+    print("-" * 55)
+    print(f"[DONE] Success: {success_count} | Failed: {fail_count} | Total: {len(accounts)}")
+    print("=" * 55)
 
 
 if __name__ == "__main__":
-    # ব্যাকগ্রাউন্ডে জয়েনিং প্রসেস শুরু করা
-    worker_thread = threading.Thread(target=bot_worker)
-    worker_thread.daemon = True
-    worker_thread.start()
-
-    # মূল থ্রেডে ওয়েব সার্ভার চালু রাখা (Render সার্ভিস যাতে স্লিপে না যায় বা এরর না দেয়)
-    run_web_server()
+    main()
